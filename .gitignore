@@ -1,4 +1,7 @@
 ./cifar10/
 *swp
 *.pyc
-
+*.pkl
+saved/
+splits/
+.idea

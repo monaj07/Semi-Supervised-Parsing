@@ -135,7 +135,13 @@ class _netG(nn.Module):
             nn.ConvTranspose2d(ngf * 2,     ngf, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ngf),
             nn.ReLU(True),
-            # state size. (ngf) x 32 x 32
+            # state size. (ngf*2) x 16 x 16
+            ##########################################################
+            ### Added this block to adapth the network for 128x128 images:
+            nn.ConvTranspose2d(ngf,     ngf, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf),
+            nn.ReLU(True),
+            ##########################################################
             nn.ConvTranspose2d(    ngf,      nc, 4, 2, 1, bias=False),
             nn.Tanh()
             # state size. (nc) x 64 x 64
@@ -176,7 +182,13 @@ class _netD(nn.Module):
             nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ndf * 8),
             nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*8) x 4 x 4
+            # state size. (ndf*8) x 8 x 8
+            ##########################################################
+            ### Added this block to adapth the network for 128x128 images:
+            nn.Conv2d(ndf * 8, ndf * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            ##########################################################
             nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
             nn.Sigmoid()
         )
@@ -207,11 +219,11 @@ real_label = .9
 fake_label = .1
 
 if opt.cuda:
-    netD.cuda()
-    netG.cuda()
-    criterion.cuda()
-    input, label = input.cuda(), label.cuda()
-    noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
+    netD.cuda(1)
+    netG.cuda(1)
+    criterion.cuda(1)
+    input, label = input.cuda(1), label.cuda(1)
+    noise, fixed_noise = noise.cuda(1), fixed_noise.cuda(1)
 
 fixed_noise = Variable(fixed_noise)
 
@@ -233,7 +245,7 @@ for epoch in range(opt.niter):
         #pdb.set_trace()
         batch_size = real_cpu.size(0)
         if opt.cuda:
-            real_cpu = real_cpu.cuda()
+            real_cpu = real_cpu.cuda(1)
         input.resize_as_(real_cpu).copy_(real_cpu)
         label.resize_(batch_size).fill_(real_label)
         inputv = Variable(input)
@@ -284,6 +296,6 @@ for epoch in range(opt.niter):
                     '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch),
                     normalize=True)
 
-    ## do checkpointing
-    #torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch))
-    #torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.outf, epoch))
+    # do checkpointing
+    torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch))
+    torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.outf, epoch))
