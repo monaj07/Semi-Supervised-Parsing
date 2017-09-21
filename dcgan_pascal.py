@@ -219,11 +219,11 @@ real_label = .9
 fake_label = .1
 
 if opt.cuda:
-    netD.cuda(1)
-    netG.cuda(1)
-    criterion.cuda(1)
-    input, label = input.cuda(1), label.cuda(1)
-    noise, fixed_noise = noise.cuda(1), fixed_noise.cuda(1)
+    netD.cuda()
+    netG.cuda()
+    criterion.cuda()
+    input, label = input.cuda(), label.cuda()
+    noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
 
 fixed_noise = Variable(fixed_noise)
 
@@ -245,7 +245,7 @@ for epoch in range(opt.niter):
         #pdb.set_trace()
         batch_size = real_cpu.size(0)
         if opt.cuda:
-            real_cpu = real_cpu.cuda(1)
+            real_cpu = real_cpu.cuda()
         input.resize_as_(real_cpu).copy_(real_cpu)
         label.resize_(batch_size).fill_(real_label)
         inputv = Variable(input)

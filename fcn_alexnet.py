@@ -100,13 +100,14 @@ def cross_entropy2d(input, target, weight=None, size_average=True):
 
 class alexnet(nn.Module):
 
-    def __init__(self, nCls=21, learned_bilinear=False):
+    def __init__(self, nCls=21, init_padding=100, learned_bilinear=False):
         super(alexnet, self).__init__()
         self.nCls = nCls
+        self.init_padding = init_padding
         self.learned_bilinear = learned_bilinear
 
         self.main_body = nn.Sequential(
-            nn.Conv2d(in_channels=3, out_channels=96, kernel_size=11, stride=4, padding=100),
+            nn.Conv2d(in_channels=3, out_channels=96, kernel_size=11, stride=4, padding=0),
             nn.BatchNorm2d(num_features=96),
             nn.LeakyReLU(negative_slope=0.2, inplace=True),
 
@@ -152,7 +153,8 @@ class alexnet(nn.Module):
     def forward(self, x):
         y = self.main_body(x)
         y = self.classifier(y)
-        output = F.upsample_bilinear(y, x.size()[2:])
+        orig_size = (x.size()[2]-2*self.init_padding, x.size()[3]-2*self.init_padding)
+        output = F.upsample_bilinear(y, orig_size)
         return output
 
 net = alexnet()
@@ -163,6 +165,18 @@ print(net)
 
 if torch.cuda.is_available():
     net.cuda(0)
+
+
+class padder_layer(nn.Module):
+    def __init__(self, pad_size):
+        super(padder_layer, self).__init__()
+        self.apply_padding = nn.ConstantPad2d(pad_size, 0) # Pad with zero values
+    def forward(self, x):
+        output = self.apply_padding(x)
+        return output
+padder = padder_layer(100)
+if torch.cuda.is_available():
+    padder.cuda(0)
 
 optimizer = torch.optim.SGD(net.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
 
@@ -179,10 +193,10 @@ for epoch in range(opt.epochs):
         poly_lr_scheduler(optimizer, opt.lr, iter)
 
         optimizer.zero_grad()
+        images = padder(images)
         outputs = net(images)
 
         loss = cross_entropy2d(outputs, labels)
-
         loss.backward()
         optimizer.step()
 
