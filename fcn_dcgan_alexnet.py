@@ -54,7 +54,6 @@ if torch.cuda.is_available():
 
 cudnn.benchmark = True
 
-
 NUM_CLASSES = 21
 if opt.dataset == 'pascal':
     dataset = Read_pascal_labeled_data(root=opt.dataroot, nCls=21, splits_path=opt.splitPath,
@@ -138,12 +137,12 @@ class alexnet_features(nn.Module):
         output = self.main_body(x)
         return output
 
-class alexnet_classifier(nn.Module):
+class alexnet_segmenter(nn.Module):
     """
     feature map to segmentation map:
     """
-    def __init__(self, orig_size, nCls=21, learned_bilinear=False, ngpu=1):
-        super(alexnet_classifier, self).__init__()
+    def __init__(self, orig_size, nCls=21, learned_bilinear=False):
+        super(alexnet_segmenter, self).__init__()
         assert (orig_size is not None)
         self.orig_size = orig_size
         self.nCls = nCls
@@ -172,16 +171,86 @@ net_features.apply(weights_init)
 if opt.netSaved != '':
     net_features.load_state_dict(torch.load(opt.netSaved))
 print(net_features)
-if torch.cuda.is_available():
-    net_features.cuda(0)
 
-net_classifier = alexnet_classifier(opt.imageSize)
-net_classifier.apply(weights_init)
+net_segmenter = alexnet_segmenter(opt.imageSize)
+net_segmenter.apply(weights_init)
 if opt.netSaved != '':
-    net_classifier.load_state_dict(torch.load(opt.netSaved))
-print(net_classifier)
-if torch.cuda.is_available():
-    net_classifier.cuda(0)
+    net_segmenter.load_state_dict(torch.load(opt.netSaved))
+print(net_segmenter)
+
+class _netG(nn.Module):
+    def __init__(self, ngpu):
+        super(_netG, self).__init__()
+        self.ngpu = ngpu
+        self.main = nn.Sequential(
+            # input is Z, going into a convolution
+            nn.ConvTranspose2d(     nz, ngf * 8, 7, 1, 0, bias=False),
+            nn.BatchNorm2d(ngf * 8),
+            nn.ReLU(True),
+            # state size. (ngf*8) x 7 x 7
+            nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 4),
+            nn.ReLU(True),
+            # state size. (ngf*4) x 14 x 14
+            nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 2),
+            nn.ReLU(True),
+            # state size. (ngf*2) x 28 x 28
+            nn.ConvTranspose2d(ngf * 2,     ngf, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf),
+            nn.ReLU(True),
+            # state size. (ngf*2) x 56 x 56
+            nn.ConvTranspose2d(ngf,     ngf, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf),
+            nn.ReLU(True),
+            # state size. (ngf*2) x 112 x 112
+        )
+        self.main2 = nn.Sequential(
+            nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False),
+            nn.Tanh()
+            # state size. (nc) x 224 x 224
+        )
+
+    def forward(self, input):
+        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+            output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
+        else:
+            output = self.main(input)
+            output = self.main2(output)
+        return output
+
+netG = _netG(ngpu)
+netG.apply(weights_init)
+if opt.netG != '':
+    netG.load_state_dict(torch.load(opt.netG))
+print(netG)
+
+class _netD(nn.Module):
+    def __init__(self, ngpu=1):
+        super(_netD, self).__init__()
+        self.ngpu = ngpu
+        self.classifier= nn.Sequential(
+            nn.Conv2d(4096, 1, 7), # Is this the right way, or we'd better use a linear layer???
+            # The data shape is now (,1)
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        y = self.classifier(x)
+        return y.view(-1, 1).squeeze(1)
+
+netD = _netD(ngpu)
+netD.apply(weights_init)
+if opt.netD != '':
+    netD.load_state_dict(torch.load(opt.netD))
+print(netD)
+
+criterion_GAN = nn.BCELoss()
+fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
+noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
+labels_GAN = torch.FloatTensor(opt.batchSize)
+real_label = .9
+fake_label = .1
 
 class padder_layer(nn.Module):
     def __init__(self, pad_size):
@@ -193,31 +262,82 @@ class padder_layer(nn.Module):
 
 padder = padder_layer(100)
 if torch.cuda.is_available():
+    net_features.cuda(0)
+    net_segmenter.cuda(0)
+    netD.cuda(0)
+    netG.cuda(0)
     padder.cuda(0)
+    noise, fixed_noise = noise.cuda(0), fixed_noise.cuda(0)
 
-optimizer_features = torch.optim.SGD(net_features.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
-optimizer_classifier = torch.optim.SGD(net_classifier.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
+optimizer_features   = torch.optim.SGD(net_features.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
+optimizer_classifier = torch.optim.SGD(net_segmenter.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
+optimizerD           = torch.optim.SGD(netD.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
+optimizerG           = torch.optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 
 for epoch in range(opt.epochs):
     for i, (images, labels) in enumerate(dataloader, 0):
         if torch.cuda.is_available():
-            images = Variable(images.cuda(0))
-            labels = Variable(labels.cuda(0))
-        else:
-            images = Variable(images)
-            labels = Variable(labels)
+            images = images.cuda(0)
+            labels = labels.cuda(0)
+            labels_GAN = labels_GAN.cuda(0)
+            noise = noise.cuda(0)
+
+        images = Variable(images)
+        labels = Variable(labels)
 
         iter = len(dataloader) * epoch + i
 
         poly_lr_scheduler(optimizer_features, opt.lr, iter)
         poly_lr_scheduler(optimizer_classifier, opt.lr, iter)
 
+        ############################
+        # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+        ###########################
+        # train the GAN discriminator with real images
+        optimizerD.zero_grad()
+        outputD_real = netD(images)
+        labels_GAN.resize_(opt.batchSize).fill_(real_label)
+        labels_GAN_var = Variable(labels_GAN)
+        lossD_real = criterion_GAN(outputD_real, labels_GAN_var)
+        lossD_real.backward()
+        D_x = outputD_real.data.mean()
+
+        # train the GAN discriminator with fake images
+        noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
+        noise_var = Variable(noise)
+        fake_images = netG(noise_var)
+        labels_GAN_var = Variable(labels_GAN.fill_(fake_label))
+        outputD_fake = netD(fake_images.detach())
+        lossD_fake = criterion_GAN(outputD_fake, labels_GAN_var)
+        lossD_fake.backward()
+        D_G_z1 = outputD_fake.data.mean()
+        lossD = lossD_real + lossD_fake
+        optimizerD.step()
+
+        ############################
+        # (2) Update G network: maximize log(D(G(z)))
+        ###########################
+        netG.zero_grad()
+        labels_GAN.resize_(opt.batchSize).fill_(real_label)
+        labels_GAN_var = Variable(labels_GAN.fill_(real_label))  # fake labels are real for generator cost
+        noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
+        noise_var = Variable(noise)
+        fake_images2 = netG(noise_var)
+        outputD_fake_real_label = netD(fake_images2)
+        lossG = criterion_GAN(outputD_fake_real_label, labels_GAN_var)
+        lossG.backward()
+        D_G_z2 = outputD_fake_real_label.data.mean()
+        optimizerG.step()
+
+        ############################
+        # (3) Update semantic labeling network
+        ###########################
         optimizer_features.zero_grad()
         optimizer_classifier.zero_grad()
 
         images = padder(images)
         feature_maps = net_features(images)
-        outputs = net_classifier(feature_maps)
+        outputs = net_segmenter(feature_maps)
 
         loss = cross_entropy2d(outputs, labels)
         loss.backward()
@@ -240,6 +360,8 @@ for epoch in range(opt.epochs):
         # vis.image(np.transpose(target, [2,0,1]), opts=dict(title='GT' + str(epoch)))
         # vis.image(np.transpose(predicted, [2,0,1]), opts=dict(title='Predicted' + str(epoch)))
 
+    fixed_noise = Variable(fixed_noise)
+
     ### Validate over the last minibatch:
     gts, preds = [], []
     pred = np.squeeze(outputs.data.max(1)[1].cpu().numpy(), axis=1)
@@ -261,4 +383,4 @@ for epoch in range(opt.epochs):
     pdb.set_trace()
     """
 
-    torch.save([net_features, net_classifier], "{}_{}.pkl".format(opt.dataset, epoch))
+    torch.save([net_features, net_segmenter], "{}_{}.pkl".format(opt.dataset, epoch))
