@@ -98,13 +98,10 @@ def cross_entropy2d(input, target, weight=None, size_average=True):
         loss /= mask.data.sum()
     return loss
 
-class alexnet(nn.Module):
+class alexnet_features(nn.Module):
 
-    def __init__(self, nCls=21, init_padding=100, learned_bilinear=False):
-        super(alexnet, self).__init__()
-        self.nCls = nCls
-        self.init_padding = init_padding
-        self.learned_bilinear = learned_bilinear
+    def __init__(self):
+        super(alexnet_features, self).__init__()
 
         self.main_body = nn.Sequential(
             nn.Conv2d(in_channels=3, out_channels=96, kernel_size=11, stride=4, padding=0),
@@ -130,17 +127,33 @@ class alexnet(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
 
             nn.MaxPool2d(3, 2),   # Maxpooling is prohibited in GAN
-        )
 
-        self.classifier = nn.Sequential(
             nn.Conv2d(256, 4096, kernel_size=7),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.5),
+        )
 
+    def forward(self, x):
+        output = self.main_body(x)
+        return output
+
+class alexnet_classifier(nn.Module):
+    """
+    feature map to segmentation map:
+    """
+    def __init__(self, orig_size, nCls=21, learned_bilinear=False):
+        super(alexnet_classifier, self).__init__()
+        assert (orig_size is not None)
+        self.orig_size = orig_size
+        self.nCls = nCls
+        self.learned_bilinear = learned_bilinear
+
+        self.main_body = nn.Sequential(
             nn.Conv2d(4096, 4096, kernel_size=1),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.5),
-
+        )
+        self.classifier= nn.Sequential(
             nn.Conv2d(4096, self.nCls, kernel_size=1),
         )
 
@@ -153,19 +166,27 @@ class alexnet(nn.Module):
     def forward(self, x):
         y = self.main_body(x)
         y = self.classifier(y)
-        orig_size = (x.size()[2]-2*self.init_padding, x.size()[3]-2*self.init_padding)
-        output = F.upsample_bilinear(y, orig_size)
+        if isinstance(self.orig_size, int):
+            self.orig_size = (self.orig_size, self.orig_size)
+        output = F.upsample_bilinear(y, self.orig_size)
         return output
 
-net = alexnet()
-net.apply(weights_init)
+
+net_features = alexnet_features()
+net_features.apply(weights_init)
 if opt.netSaved != '':
-    net.load_state_dict(torch.load(opt.netSaved))
-print(net)
-
+    net_features.load_state_dict(torch.load(opt.netSaved))
+print(net_features)
 if torch.cuda.is_available():
-    net.cuda(0)
+    net_features.cuda(0)
 
+net_classifier = alexnet_classifier(opt.imageSize)
+net_classifier.apply(weights_init)
+if opt.netSaved != '':
+    net_classifier.load_state_dict(torch.load(opt.netSaved))
+print(net_classifier)
+if torch.cuda.is_available():
+    net_classifier.cuda(0)
 
 class padder_layer(nn.Module):
     def __init__(self, pad_size):
@@ -174,11 +195,13 @@ class padder_layer(nn.Module):
     def forward(self, x):
         output = self.apply_padding(x)
         return output
+
 padder = padder_layer(100)
 if torch.cuda.is_available():
     padder.cuda(0)
 
-optimizer = torch.optim.SGD(net.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
+optimizer_features = torch.optim.SGD(net_features.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
+optimizer_classifier = torch.optim.SGD(net_classifier.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
 
 for epoch in range(opt.epochs):
     for i, (images, labels) in enumerate(dataloader, 0):
@@ -190,15 +213,22 @@ for epoch in range(opt.epochs):
             labels = Variable(labels)
 
         iter = len(dataloader) * epoch + i
-        poly_lr_scheduler(optimizer, opt.lr, iter)
 
-        optimizer.zero_grad()
+        poly_lr_scheduler(optimizer_features, opt.lr, iter)
+        poly_lr_scheduler(optimizer_classifier, opt.lr, iter)
+
+        optimizer_features.zero_grad()
+        optimizer_classifier.zero_grad()
+
         images = padder(images)
-        outputs = net(images)
+        feature_maps = net_features(images)
+        outputs = net_classifier(feature_maps)
 
         loss = cross_entropy2d(outputs, labels)
         loss.backward()
-        optimizer.step()
+
+        optimizer_features.step()
+        optimizer_classifier.step()
 
         """
         vis.line(
@@ -236,4 +266,4 @@ for epoch in range(opt.epochs):
     pdb.set_trace()
     """
 
-    torch.save(net, "{}_{}.pkl".format(opt.dataset, epoch))
+    torch.save([net_features, net_classifier], "{}_{}.pkl".format(opt.dataset, epoch))

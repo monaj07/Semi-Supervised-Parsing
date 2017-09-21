@@ -1,4 +1,4 @@
-./cifar10/
+cifar10/
 *swp
 *.pyc
 *.pkl

@@ -2,6 +2,8 @@ from __future__ import print_function
 import argparse
 import os
 import random
+
+from read_pascal_images import *
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -12,6 +14,8 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
+
+import pdb
 
 
 parser = argparse.ArgumentParser()
@@ -63,6 +67,14 @@ if opt.dataset in ['imagenet', 'folder', 'lfw']:
                                    transforms.ToTensor(),
                                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                                ]))
+elif opt.dataset == 'pascal':
+    dataset = Read_pascal_images(root=opt.dataroot,
+                                 transform=transforms.Compose([
+                                     transforms.Scale(opt.imageSize),
+                                     transforms.CenterCrop(opt.imageSize),
+                                     transforms.ToTensor(),
+                                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                                 ]))
 elif opt.dataset == 'lsun':
     dataset = dset.LSUN(db_path=opt.dataroot, classes=['bedroom_train'],
                         transform=transforms.Compose([
@@ -108,25 +120,31 @@ class _netG(nn.Module):
         self.ngpu = ngpu
         self.main = nn.Sequential(
             # input is Z, going into a convolution
-            nn.ConvTranspose2d(     nz, ngf * 8, 4, 1, 0, bias=False),
+            nn.ConvTranspose2d(     nz, ngf * 8, 7, 1, 0, bias=False),
             nn.BatchNorm2d(ngf * 8),
             nn.ReLU(True),
-            # state size. (ngf*8) x 4 x 4
+            # state size. (ngf*8) x 7 x 7
             nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ngf * 4),
             nn.ReLU(True),
-            # state size. (ngf*4) x 8 x 8
+            # state size. (ngf*4) x 14 x 14
             nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ngf * 2),
             nn.ReLU(True),
-            # state size. (ngf*2) x 16 x 16
+            # state size. (ngf*2) x 28 x 28
             nn.ConvTranspose2d(ngf * 2,     ngf, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ngf),
             nn.ReLU(True),
-            # state size. (ngf) x 32 x 32
-            nn.ConvTranspose2d(    ngf,      nc, 4, 2, 1, bias=False),
+            # state size. (ngf*2) x 56 x 56
+            nn.ConvTranspose2d(ngf,     ngf, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf),
+            nn.ReLU(True),
+            # state size. (ngf*2) x 112 x 112
+        )
+        self.main2 = nn.Sequential(
+            nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False),
             nn.Tanh()
-            # state size. (nc) x 64 x 64
+            # state size. (nc) x 224 x 224
         )
 
     def forward(self, input):
@@ -134,6 +152,7 @@ class _netG(nn.Module):
             output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
         else:
             output = self.main(input)
+            output = self.main2(output)
         return output
 
 
@@ -149,23 +168,40 @@ class _netD(nn.Module):
         super(_netD, self).__init__()
         self.ngpu = ngpu
         self.main = nn.Sequential(
-            # input is (nc) x 64 x 64
-            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
+            nn.Conv2d(in_channels=3, out_channels=96, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(num_features=96),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            #nn.MaxPool2d(kernel_size=3, stride=2),                      # Maxpooling is prohibited in GAN
+            nn.Conv2d(96, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf) x 32 x 32
-            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 2),
+
+            #nn.MaxPool2d(3, 2),                                         # Maxpooling is prohibited in GAN
+            nn.Conv2d(256, 384, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(384),
             nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*2) x 16 x 16
-            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 4),
+
+            nn.Conv2d(384, 384, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(384),
             nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*4) x 8 x 8
-            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ndf * 8),
+            nn.Conv2d(384, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*8) x 4 x 4
-            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
+            #nn.MaxPool2d(3, 2),                                         # Maxpooling is prohibited in GAN
+
+            nn.Conv2d(256, 4096, kernel_size=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.5),
+
+            nn.Conv2d(4096, 4096, kernel_size=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.5),
+        )
+        self.main2 = nn.Sequential(
+            # The data shape is now 4096 x 7 x 7
+            nn.Conv2d(4096, 1, 7), # Is this the right way, or we'd better use a linear layer???
+            # The data shape is now (,1)
             nn.Sigmoid()
         )
 
@@ -174,6 +210,7 @@ class _netD(nn.Module):
             output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
         else:
             output = self.main(input)
+            output = self.main2(output)
 
         return output.view(-1, 1).squeeze(1)
 
@@ -190,23 +227,22 @@ input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
 noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
 fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
 label = torch.FloatTensor(opt.batchSize)
+
 real_label = .9
 fake_label = .1
 
 if opt.cuda:
-    netD.cuda()
-    netG.cuda()
-    criterion.cuda()
-    input, label = input.cuda(), label.cuda()
-    noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
+    netD.cuda(0)
+    netG.cuda(0)
+    criterion.cuda(0)
+    input, label = input.cuda(0), label.cuda(0)
+    noise, fixed_noise = noise.cuda(0), fixed_noise.cuda(0)
 
 fixed_noise = Variable(fixed_noise)
 
 # setup optimizer
 optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-
-import pdb
 
 for epoch in range(opt.niter):
     for i, data in enumerate(dataloader, 0):
@@ -215,10 +251,14 @@ for epoch in range(opt.niter):
         ###########################
         # train with real
         netD.zero_grad()
-        real_cpu, _ = data
+        if opt.dataset=='pascal':
+            real_cpu = data
+        else:
+            real_cpu, _ = data
+        #pdb.set_trace()
         batch_size = real_cpu.size(0)
         if opt.cuda:
-            real_cpu = real_cpu.cuda()
+            real_cpu = real_cpu.cuda(0)
         input.resize_as_(real_cpu).copy_(real_cpu)
         label.resize_(batch_size).fill_(real_label)
         inputv = Variable(input)
@@ -244,19 +284,13 @@ for epoch in range(opt.niter):
         ############################
         # (2) Update G network: maximize log(D(G(z)))
         ###########################
-        """
-        batch_size_G = 64
         netG.zero_grad()
-        label.resize_(batch_size_G).fill_(real_label)
+        label.resize_(batch_size).fill_(real_label)
         labelv = Variable(label.fill_(real_label))  # fake labels are real for generator cost
-        noise.resize_(batch_size_G, nz, 1, 1).normal_(0, 1)
+        noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
         noise2v = Variable(noise)
         fake2 = netG(noise2v)
         output = netD(fake2)
-        """
-        netG.zero_grad()
-        labelv = Variable(label.fill_(real_label))  # fake labels are real for generator cost
-        output = netD(fake)
         errG = criterion(output, labelv)
         errG.backward()
         D_G_z2 = output.data.mean()
@@ -274,6 +308,6 @@ for epoch in range(opt.niter):
                     '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch),
                     normalize=True)
 
-    ## do checkpointing
-    #torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch))
-    #torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.outf, epoch))
+    # do checkpointing
+    torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch))
+    torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.outf, epoch))
