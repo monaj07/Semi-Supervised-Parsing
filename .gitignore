@@ -5,3 +5,5 @@ cifar10/
 saved/
 splits/
 .idea
+alaki.py
+*.png

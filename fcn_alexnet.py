@@ -105,25 +105,25 @@ class alexnet_features(nn.Module):
             nn.BatchNorm2d(num_features=96),
             nn.LeakyReLU(negative_slope=0.2, inplace=True),
 
-            nn.MaxPool2d(kernel_size=3, stride=2),
+            #nn.MaxPool2d(kernel_size=3, stride=2),
 
-            nn.Conv2d(96, 256, kernel_size=5, padding=2),
+            nn.Conv2d(96, 256, kernel_size=5, stride=2, padding=2),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.MaxPool2d(3, 2),
+            #nn.MaxPool2d(3, 2),
 
-            nn.Conv2d(256, 384, kernel_size=3, padding=1),
+            nn.Conv2d(256, 384, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(384),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(384, 384, kernel_size=3, padding=1),
             nn.BatchNorm2d(384),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(384, 256, kernel_size=3, padding=1),
+            nn.Conv2d(384, 256, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.MaxPool2d(3, 2),
+            #nn.MaxPool2d(3, 2),
 
             nn.Conv2d(256, 4096, kernel_size=7),
             nn.LeakyReLU(0.2, inplace=True),

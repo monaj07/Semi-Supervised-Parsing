@@ -15,6 +15,7 @@ import random
 from read_pascal_images import *
 from lr_scheduling import *
 from metric import scores
+import torchvision.utils as vutils
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', required=True, help='pascal | cifar10 | lsun | imagenet | folder | lfw | fake')
@@ -32,8 +33,9 @@ parser.add_argument('--lr', type=float, default=0.00001, help='learning rate, de
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
+parser.add_argument('--netD', default='', help="path to netD (to continue training)")
 parser.add_argument('--netSaved', default='', help="path to saved net (to continue training)")
-parser.add_argument('--outf', default='.', help='folder to output images and model checkpoints')
+parser.add_argument('--outf', default='./saved', help='folder to output images and model checkpoints')
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 
 opt = parser.parse_args()
@@ -104,29 +106,30 @@ class alexnet_features(nn.Module):
             nn.BatchNorm2d(num_features=96),
             nn.LeakyReLU(negative_slope=0.2, inplace=True),
 
-            nn.MaxPool2d(kernel_size=3, stride=2),
+            #nn.MaxPool2d(kernel_size=3, stride=2),
 
-            nn.Conv2d(96, 256, kernel_size=5, padding=2),
+            nn.Conv2d(96, 256, kernel_size=5, stride=2, padding=2),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.MaxPool2d(3, 2),
+            #nn.MaxPool2d(3, 2),
 
-            nn.Conv2d(256, 384, kernel_size=3, padding=1),
+            nn.Conv2d(256, 384, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(384),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(384, 384, kernel_size=3, padding=1),
             nn.BatchNorm2d(384),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(384, 256, kernel_size=3, padding=1),
+            nn.Conv2d(384, 256, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
-
-            nn.MaxPool2d(3, 2),
+            #nn.MaxPool2d(3, 2),
 
             nn.Conv2d(256, 4096, kernel_size=7),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.5),
+        )
+        self.main_body2 = nn.Sequential(
 
             nn.Conv2d(4096, 4096, kernel_size=1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -135,6 +138,7 @@ class alexnet_features(nn.Module):
 
     def forward(self, x):
         output = self.main_body(x)
+        output = self.main_body2(output)
         return output
 
 class alexnet_segmenter(nn.Module):
@@ -230,7 +234,7 @@ class _netD(nn.Module):
         super(_netD, self).__init__()
         self.ngpu = ngpu
         self.classifier= nn.Sequential(
-            nn.Conv2d(4096, 1, 7), # Is this the right way, or we'd better use a linear layer???
+            nn.Conv2d(4096, 1, 1), # Is this the right way, or we'd better use a linear layer???
             # The data shape is now (,1)
             nn.Sigmoid()
         )
@@ -249,8 +253,8 @@ criterion_GAN = nn.BCELoss()
 fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
 noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
 labels_GAN = torch.FloatTensor(opt.batchSize)
-real_label = .9
-fake_label = .1
+real_label = .7
+fake_label = 0.3
 
 class padder_layer(nn.Module):
     def __init__(self, pad_size):
@@ -268,11 +272,14 @@ if torch.cuda.is_available():
     netG.cuda(0)
     padder.cuda(0)
     noise, fixed_noise = noise.cuda(0), fixed_noise.cuda(0)
+fixed_noise = Variable(fixed_noise)
 
-optimizer_features   = torch.optim.SGD(net_features.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
-optimizer_classifier = torch.optim.SGD(net_segmenter.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
-optimizerD           = torch.optim.SGD(netD.parameters(), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
-optimizerG           = torch.optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+optimizer_segmentation = torch.optim.SGD(list(net_features.parameters())+list(net_segmenter.parameters()), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
+optimizerD             = torch.optim.SGD(list(net_features.parameters())+list(netD.parameters()), lr=opt.lr, momentum=0.99, weight_decay=5e-4)
+optimizerG             = torch.optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+
+SS = 0
+GAN = 1
 
 for epoch in range(opt.epochs):
     for i, (images, labels) in enumerate(dataloader, 0):
@@ -287,95 +294,116 @@ for epoch in range(opt.epochs):
 
         iter = len(dataloader) * epoch + i
 
-        poly_lr_scheduler(optimizer_features, opt.lr, iter)
-        poly_lr_scheduler(optimizer_classifier, opt.lr, iter)
+        poly_lr_scheduler(optimizer_segmentation, opt.lr, iter)
 
-        ############################
-        # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
-        ###########################
-        # train the GAN discriminator with real images
-        optimizerD.zero_grad()
-        outputD_real = netD(images)
-        labels_GAN.resize_(opt.batchSize).fill_(real_label)
-        labels_GAN_var = Variable(labels_GAN)
-        lossD_real = criterion_GAN(outputD_real, labels_GAN_var)
-        lossD_real.backward()
-        D_x = outputD_real.data.mean()
+        if (GAN):
+            ############################
+            # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+            ###########################
+            # train the GAN discriminator with real images
+            batch_size = images.size()[0]
+            optimizerD.zero_grad()
+            feature_maps = net_features(images)
+            outputD_real = netD(feature_maps)
+            labels_GAN.resize_(batch_size).fill_(real_label)
+            labels_GAN_var = Variable(labels_GAN)
+            lossD_real = criterion_GAN(outputD_real, labels_GAN_var)
+            lossD_real.backward()
+            D_x = outputD_real.data.mean()
 
-        # train the GAN discriminator with fake images
-        noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
-        noise_var = Variable(noise)
-        fake_images = netG(noise_var)
-        labels_GAN_var = Variable(labels_GAN.fill_(fake_label))
-        outputD_fake = netD(fake_images.detach())
-        lossD_fake = criterion_GAN(outputD_fake, labels_GAN_var)
-        lossD_fake.backward()
-        D_G_z1 = outputD_fake.data.mean()
-        lossD = lossD_real + lossD_fake
-        optimizerD.step()
+            # train the GAN discriminator with fake images
+            noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
+            noise_var = Variable(noise)
+            fake_images = netG(noise_var)
+            feature_maps = net_features(fake_images)
+            outputD_fake = netD(feature_maps.detach())
+            labels_GAN_var = Variable(labels_GAN.fill_(fake_label))
+            lossD_fake = criterion_GAN(outputD_fake, labels_GAN_var)
+            lossD_fake.backward()
+            D_G_z1 = outputD_fake.data.mean()
+            lossD = lossD_real + lossD_fake
+            optimizerD.step()
 
-        ############################
-        # (2) Update G network: maximize log(D(G(z)))
-        ###########################
-        netG.zero_grad()
-        labels_GAN.resize_(opt.batchSize).fill_(real_label)
-        labels_GAN_var = Variable(labels_GAN.fill_(real_label))  # fake labels are real for generator cost
-        noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
-        noise_var = Variable(noise)
-        fake_images2 = netG(noise_var)
-        outputD_fake_real_label = netD(fake_images2)
-        lossG = criterion_GAN(outputD_fake_real_label, labels_GAN_var)
-        lossG.backward()
-        D_G_z2 = outputD_fake_real_label.data.mean()
-        optimizerG.step()
+            if i % 5 == 0:
+                ############################
+                # (2) Update G network: maximize log(D(G(z)))
+                ###########################
+                optimizerG.zero_grad()
+                labels_GAN.resize_(batch_size).fill_(real_label)
+                labels_GAN_var = Variable(labels_GAN.fill_(real_label))  # fake labels are real for generator cost
+                noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
+                noise_var = Variable(noise)
+                fake_images2 = netG(noise_var)
+                feature_maps = net_features(fake_images2)
+                outputD_fake_real_label = netD(feature_maps)
+                lossG = criterion_GAN(outputD_fake_real_label, labels_GAN_var)
+                lossG.backward()
+                D_G_z2 = outputD_fake_real_label.data.mean()
+                optimizerG.step()
 
-        ############################
-        # (3) Update semantic labeling network
-        ###########################
-        optimizer_features.zero_grad()
-        optimizer_classifier.zero_grad()
 
-        images = padder(images)
-        feature_maps = net_features(images)
-        outputs = net_segmenter(feature_maps)
+        if (SS):
+            ############################
+            # Update semantic labeling network
+            ###########################
+            optimizer_segmentation.zero_grad()
 
-        loss = cross_entropy2d(outputs, labels)
-        loss.backward()
+            images = padder(images)
+            feature_maps = net_features(images)
+            outputs = net_segmenter(feature_maps)
 
-        optimizer_features.step()
-        optimizer_classifier.step()
+            loss = cross_entropy2d(outputs, labels)
+            loss.backward()
 
-        """
-        vis.line(
-            X=torch.ones((1, 1)).cpu() * i,
-            Y=torch.Tensor([loss.data[0]]).unsqueeze(0).cpu(),
-            win=loss_window,
-            update='append')
-        """
-        if (i + 1) % 10 == 0:
-            print("Iter [%d/%d] Epoch [%d/%d] Loss: %.4f" % (i + 1, len(dataloader), epoch + 1, opt.epochs, loss.data[0]))
+            optimizer_segmentation.step()
+
+
+
+            """
+            vis.line(
+                X=torch.ones((1, 1)).cpu() * i,
+                Y=torch.Tensor([loss.data[0]]).unsqueeze(0).cpu(),
+                win=loss_window,
+                update='append')
+            """
+
+        if (GAN):
+            if i % 10 == 0:
+                print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f'
+                      % (epoch, opt.epochs, i, len(dataloader),
+                         lossD.data[0], lossG.data[0], D_x, D_G_z1, D_G_z2))
+            if i % 100 == 0:
+                vutils.save_image(images.data.cpu(), '%s/real_samples.png' % opt.outf, normalize=True)
+                fake = netG(fixed_noise)
+                vutils.save_image(fake.data, '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch), normalize=True)
+
+        if (SS):
+            if (i + 1) % 10 == 0:
+                print("Iter [%d/%d] Epoch [%d/%d] Loss: %.4f" % (i + 1, len(dataloader), epoch + 1, opt.epochs, loss.data[0]))
 
 
         # vis.image(test_image[0].cpu().data.numpy(), opts=dict(title='Input' + str(epoch)))
         # vis.image(np.transpose(target, [2,0,1]), opts=dict(title='GT' + str(epoch)))
         # vis.image(np.transpose(predicted, [2,0,1]), opts=dict(title='Predicted' + str(epoch)))
 
-    fixed_noise = Variable(fixed_noise)
+    if (SS):
+        ### Validate over the last minibatch:
+        gts, preds = [], []
+        pred = np.squeeze(outputs.data.max(1)[1].cpu().numpy(), axis=1)
+        gt = labels.data.cpu().numpy()
+        for gt_, pred_ in zip(gt, pred):
+            gts.append(gt_)
+            preds.append(pred_)
 
-    ### Validate over the last minibatch:
-    gts, preds = [], []
-    pred = np.squeeze(outputs.data.max(1)[1].cpu().numpy(), axis=1)
-    gt = labels.data.cpu().numpy()
-    for gt_, pred_ in zip(gt, pred):
-        gts.append(gt_)
-        preds.append(pred_)
+        print('\n' + '-' * 40)
+        score, class_iou = scores(gts, preds, n_class=NUM_CLASSES)
+        for k, v in score.items():
+            print k, v
+        print('-' * 20)
+        for i in range(NUM_CLASSES):
+            print i, class_iou[i]
+        print('-' * 40 + '\n')
 
-    score, class_iou = scores(gts, preds, n_class=NUM_CLASSES)
-    for k, v in score.items():
-        print k, v
-
-    for i in range(NUM_CLASSES):
-        print i, class_iou[i]
     """
     test_output = outputs[0, ...].cpu().data.numpy()
     predicted = dataset.decode_segmap(test_output.argmax(0))
