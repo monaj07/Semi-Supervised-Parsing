@@ -36,6 +36,8 @@ parser.add_argument('--netG', default='', help="path to netG (to continue traini
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
 parser.add_argument('--outf', default='.', help='folder to output images and model checkpoints')
 parser.add_argument('--manualSeed', type=int, help='manual seed')
+parser.add_argument('--splitPath', required=True, help='path to dataset splits')
+parser.add_argument('--phase', required=True, help='train | val')
 
 opt = parser.parse_args()
 print(opt)
@@ -68,13 +70,8 @@ if opt.dataset in ['imagenet', 'folder', 'lfw']:
                                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                                ]))
 elif opt.dataset == 'pascal':
-    dataset = Read_pascal_images(root=opt.dataroot,
-                                 transform=transforms.Compose([
-                                     transforms.Scale(opt.imageSize),
-                                     transforms.CenterCrop(opt.imageSize),
-                                     transforms.ToTensor(),
-                                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                                 ]))
+    dataset = Read_pascal_labeled_data(root=opt.dataroot, nCls=21, splits_path=opt.splitPath,
+                                       split=opt.phase, img_size=opt.imageSize, apply_transform=True)
 elif opt.dataset == 'lsun':
     dataset = dset.LSUN(db_path=opt.dataroot, classes=['bedroom_train'],
                         transform=transforms.Compose([
@@ -251,10 +248,8 @@ for epoch in range(opt.niter):
         ###########################
         # train with real
         netD.zero_grad()
-        if opt.dataset=='pascal':
-            real_cpu = data
-        else:
-            real_cpu, _ = data
+
+        real_cpu, _ = data
         #pdb.set_trace()
         batch_size = real_cpu.size(0)
         if opt.cuda:
