@@ -79,6 +79,8 @@ elif opt.dataset == 'pascal':
     NUM_CLASSES = 21
     dataset = Read_pascal_labeled_data(root=opt.dataroot, nCls=NUM_CLASSES, splits_path=opt.splitPath,
                                        split=opt.phase, img_size=opt.imageSize, apply_transform=True)
+    dataset_val = Read_pascal_labeled_data(root=opt.dataroot, nCls=NUM_CLASSES, splits_path=opt.splitPath,
+                                       split='val', img_size=opt.imageSize, apply_transform=True)
 elif opt.dataset == 'lsun':
     dataset = dset.LSUN(db_path=opt.dataroot, classes=['bedroom_train'],
                         transform=transforms.Compose([
@@ -97,9 +99,11 @@ elif opt.dataset == 'cifar10':
 elif opt.dataset == 'fake':
     dataset = dset.FakeData(image_size=(3, opt.imageSize, opt.imageSize),
                             transform=transforms.ToTensor())
-assert dataset
+assert (dataset and dataset_val)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize,
                                          shuffle=True, num_workers=int(opt.workers))
+dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=opt.batchSize,
+                                         shuffle=False, num_workers=int(opt.workers))
 
 ngpu = int(opt.ngpu)
 nz = int(opt.nz)
@@ -325,8 +329,8 @@ optimizerS = optim.Adam(list(net_features.parameters())+list(net_segmenter.param
 optimizerD = optim.Adam(list(net_features.parameters())+list(netD.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
 optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 
-SS = 0
-GAN = 1
+SS =  1
+GAN = 0
 
 for epoch in range(opt.niter):
     for i, data in enumerate(dataloader, 0):
@@ -425,16 +429,29 @@ for epoch in range(opt.niter):
                 print("Iter [%d/%d] Epoch [%d/%d] Loss: %.4f" % (i + 1, len(dataloader), epoch + 1, opt.niter, loss.data[0]))
 
     ######################################################
-    ### Evaluation of the semantic segmentation:
+    ### Validation of the semantic segmentation module:
     ######################################################
     if SS:
-        ### Validate only over the last processed minibatch:
         gts, preds = [], []
-        pred = np.squeeze(outputs.data.max(1)[1].cpu().numpy(), axis=1)
-        gt = labelv_semantic.data.cpu().numpy()
-        for gt_, pred_ in zip(gt, pred):
-            gts.append(gt_)
-            preds.append(pred_)
+        for j, data_val in enumerate(dataloader_val, 0):
+            real_cpu, label_cpu = data_val
+            batch_size = real_cpu.size(0)
+            if opt.cuda:
+                real_cpu = real_cpu.cuda()
+                label_cpu = label_cpu.cuda()
+            input.resize_as_(real_cpu).copy_(real_cpu)
+            inputv = Variable(input)
+            labelv_semantic = Variable(label_cpu)
+
+            images = padder(inputv)
+            feature_maps = net_features(images)
+            outputs = net_segmenter(feature_maps)
+
+            pred = np.squeeze(outputs.data.max(1)[1].cpu().numpy(), axis=1)
+            gt = labelv_semantic.data.cpu().numpy()
+            for gt_, pred_ in zip(gt, pred):
+                gts.append(gt_)
+                preds.append(pred_)
 
         print('\n' + '-' * 40)
         score, class_iou = scores(gts, preds, n_class=NUM_CLASSES)
