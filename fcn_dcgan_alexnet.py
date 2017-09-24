@@ -6,7 +6,7 @@ import random
 from read_pascal_images import *
 import torch
 import torch.nn as nn
-import torch.functional as F
+import torch.nn.functional as F
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
@@ -15,6 +15,9 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
+
+from lr_scheduling import *
+from metric import scores
 
 import pdb
 
@@ -73,7 +76,8 @@ if opt.dataset in ['imagenet', 'folder', 'lfw']:
                                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                                ]))
 elif opt.dataset == 'pascal':
-    dataset = Read_pascal_labeled_data(root=opt.dataroot, nCls=21, splits_path=opt.splitPath,
+    NUM_CLASSES = 21
+    dataset = Read_pascal_labeled_data(root=opt.dataroot, nCls=NUM_CLASSES, splits_path=opt.splitPath,
                                        split=opt.phase, img_size=opt.imageSize, apply_transform=True)
 elif opt.dataset == 'lsun':
     dataset = dset.LSUN(db_path=opt.dataroot, classes=['bedroom_train'],
@@ -285,6 +289,15 @@ if opt.netD != '':
     netD.load_state_dict(torch.load(os.path.join(opt.outf, opt.netD)))
 print(netD)
 
+class padder_layer(nn.Module):
+    def __init__(self, pad_size):
+        super(padder_layer, self).__init__()
+        self.apply_padding = nn.ConstantPad2d(pad_size, 0) # Pad with zero values
+    def forward(self, x):
+        output = self.apply_padding(x)
+        return output
+padder = padder_layer(100)
+
 criterion = nn.BCELoss()
 
 input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
@@ -297,6 +310,8 @@ fake_label = .1
 
 if opt.cuda:
     net_features.cuda()
+    net_segmenter.cuda()
+    padder.cuda()
     netD.cuda()
     netG.cuda()
     criterion.cuda()
@@ -306,77 +321,133 @@ if opt.cuda:
 fixed_noise = Variable(fixed_noise)
 
 # setup optimizer
+optimizerS = optim.Adam(list(net_features.parameters())+list(net_segmenter.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
 optimizerD = optim.Adam(list(net_features.parameters())+list(netD.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
 optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 
+SS = 0
+GAN = 1
+
 for epoch in range(opt.niter):
     for i, data in enumerate(dataloader, 0):
-        ############################
-        # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
-        ###########################
-        # train with real
-        netD.zero_grad()
-        net_features.zero_grad()
 
-        real_cpu, _ = data
-        #pdb.set_trace()
+        real_cpu, label_cpu = data
         batch_size = real_cpu.size(0)
         if opt.cuda:
             real_cpu = real_cpu.cuda()
+            label_cpu = label_cpu.cuda()
         input.resize_as_(real_cpu).copy_(real_cpu)
-        label.resize_(batch_size).fill_(real_label)
         inputv = Variable(input)
-        labelv = Variable(label)
+        labelv_semantic = Variable(label_cpu)
 
-        inputv_feats = net_features(inputv)
-        output = netD(inputv_feats)
-        errD_real = criterion(output, labelv)
-        errD_real.backward()
-        D_x = output.data.mean()
+        if GAN:
+            ############################
+            # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+            ###########################
+            netD.zero_grad()
+            net_features.zero_grad()
 
-        # train with fake
-        noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
-        noisev = Variable(noise)
-        fake = netG(noisev)
-        labelv = Variable(label.fill_(fake_label))
-        fake_feats = net_features(fake.detach())
-        output = netD(fake_feats)
-        errD_fake = criterion(output, labelv)
-        errD_fake.backward()
-        D_G_z1 = output.data.mean()
-        errD = errD_real + errD_fake
-        optimizerD.step()
+            # train with real
+            label.resize_(batch_size).fill_(real_label)
+            labelv = Variable(label)
+            inputv_feats = net_features(inputv)
+            output = netD(inputv_feats)
+            errD_real = criterion(output, labelv)
+            errD_real.backward()
+            D_x = output.data.mean()
 
-        ############################
-        # (2) Update G network: maximize log(D(G(z)))
-        ###########################
-        netG.zero_grad()
-        label.resize_(batch_size).fill_(real_label)
-        labelv = Variable(label.fill_(real_label))  # fake labels are real for generator cost
-        noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
-        noise2v = Variable(noise)
-        fake2 = netG(noise2v)
-        fake_feats2 = net_features(fake2)
-        output = netD(fake_feats2)
-        errG = criterion(output, labelv)
-        errG.backward()
-        D_G_z2 = output.data.mean()
-        optimizerG.step()
+            # train with fake
+            noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
+            noisev = Variable(noise)
+            fake = netG(noisev)
+            labelv = Variable(label.fill_(fake_label))
+            fake_feats = net_features(fake.detach())
+            output = netD(fake_feats)
+            errD_fake = criterion(output, labelv)
+            errD_fake.backward()
+            D_G_z1 = output.data.mean()
 
-        print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f'
-              % (epoch, opt.niter, i, len(dataloader),
-                 errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2))
-        if i % 100 == 0:
-            vutils.save_image(real_cpu,
-                    '%s/real_samples.png' % opt.outf,
-                    normalize=True)
-            fake = netG(fixed_noise)
-            vutils.save_image(fake.data,
-                    '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch),
-                    normalize=True)
+            errD = errD_real + errD_fake
+            optimizerD.step()
+
+            ############################
+            # (2) Update G network: maximize log(D(G(z)))
+            ###########################
+            netG.zero_grad()
+
+            label.resize_(batch_size).fill_(real_label)
+            labelv = Variable(label.fill_(real_label))  # fake labels are real for generator cost
+            noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
+            noise2v = Variable(noise)
+            fake2 = netG(noise2v)
+            fake_feats2 = net_features(fake2)
+            output = netD(fake_feats2)
+            errG = criterion(output, labelv)
+            errG.backward()
+            D_G_z2 = output.data.mean()
+            optimizerG.step()
+
+        if SS:
+            ############################
+            # Update semantic labeling network
+            ###########################
+            net_features.zero_grad()
+            net_segmenter.zero_grad()
+
+            images = padder(inputv)
+            feature_maps = net_features(images)
+            outputs = net_segmenter(feature_maps)
+
+            loss = cross_entropy2d(outputs, labelv_semantic)
+            loss.backward()
+
+            optimizerS.step()
+
+        ######################################################
+        ### Loss Report:
+        ######################################################
+
+        if GAN:
+            if (i + 1) % 10 == 0:
+                print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f'
+                      % (epoch, opt.niter, i+1, len(dataloader),
+                         errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2))
+            if i % 100 == 0:
+                vutils.save_image(real_cpu,
+                        '%s/real_samples.png' % opt.outf,
+                        normalize=True)
+                fake = netG(fixed_noise)
+                vutils.save_image(fake.data,
+                        '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch),
+                        normalize=True)
+        if (SS):
+            if (i + 1) % 10 == 0:
+                print("Iter [%d/%d] Epoch [%d/%d] Loss: %.4f" % (i + 1, len(dataloader), epoch + 1, opt.niter, loss.data[0]))
+
+    ######################################################
+    ### Evaluation of the semantic segmentation:
+    ######################################################
+    if SS:
+        ### Validate only over the last processed minibatch:
+        gts, preds = [], []
+        pred = np.squeeze(outputs.data.max(1)[1].cpu().numpy(), axis=1)
+        gt = labelv_semantic.data.cpu().numpy()
+        for gt_, pred_ in zip(gt, pred):
+            gts.append(gt_)
+            preds.append(pred_)
+
+        print('\n' + '-' * 40)
+        score, class_iou = scores(gts, preds, n_class=NUM_CLASSES)
+        for k, v in score.items():
+            print(k, v)
+        print('-' * 20)
+        for i in range(NUM_CLASSES):
+            print(i, class_iou[i])
+        print('-' * 40 + '\n')
 
     # do checkpointing
     if (epoch%10==0) and (epoch>0):
         torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch))
         torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.outf, epoch))
         torch.save(net_features.state_dict(), '%s/net_features_epoch_%d.pth' % (opt.outf, epoch))
+        torch.save(net_segmenter.state_dict(), '%s/net_segmenter_epoch_%d.pth' % (opt.outf, epoch))
