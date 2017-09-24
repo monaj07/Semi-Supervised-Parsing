@@ -6,4 +6,4 @@ saved/
 splits/
 .idea
 alaki.py
-*.png
+*.pth

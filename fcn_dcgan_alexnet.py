@@ -39,8 +39,8 @@ parser.add_argument('--outf', default='./saved', help='folder to output images a
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('--splitPath', required=True, help='path to dataset splits')
 parser.add_argument('--phase', required=True, help='train | val')
-parser.add_argument('--feature_net_saved', default='', help="path to feature_net (to continue training)")
-parser.add_argument('--segmenter_net_saved', default='', help="path to segmenter_net (to continue training)")
+parser.add_argument('--net_features', default='', help="path to feature_net (to continue training)")
+parser.add_argument('--net_segmenter', default='', help="path to segmenter_net (to continue training)")
 
 opt = parser.parse_args()
 print(opt)
@@ -204,14 +204,14 @@ class alexnet_segmenter(nn.Module):
 
 net_features = alexnet_features()
 net_features.apply(weights_init)
-if opt.feature_net_saved != '':
-    net_features.load_state_dict(torch.load(opt.feature_net_saved))
+if opt.net_features != '':
+    net_features.load_state_dict(torch.load(os.path.join(opt.outf, opt.net_features)))
 print(net_features)
 
 net_segmenter = alexnet_segmenter(opt.imageSize)
 net_segmenter.apply(weights_init)
-if opt.segmenter_net_saved != '':
-    net_segmenter.load_state_dict(torch.load(opt.segmenter_net_saved))
+if opt.net_segmenter != '':
+    net_segmenter.load_state_dict(torch.load(os.path.join(opt.outf, opt.net_segmenter)))
 print(net_segmenter)
 
 
@@ -260,7 +260,7 @@ class _netG(nn.Module):
 netG = _netG(ngpu)
 netG.apply(weights_init)
 if opt.netG != '':
-    netG.load_state_dict(torch.load(opt.netG))
+    netG.load_state_dict(torch.load(os.path.join(opt.outf, opt.netG)))
 print(netG)
 
 
@@ -282,7 +282,7 @@ class _netD(nn.Module):
 netD = _netD(ngpu)
 netD.apply(weights_init)
 if opt.netD != '':
-    netD.load_state_dict(torch.load(opt.netD))
+    netD.load_state_dict(torch.load(os.path.join(opt.outf, opt.netD)))
 print(netD)
 
 criterion = nn.BCELoss()
