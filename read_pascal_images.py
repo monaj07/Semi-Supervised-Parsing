@@ -122,4 +122,88 @@ class Read_pascal_labeled_data(Dataset):
         else:
             return rgb
 
-#pascal_data = Read_pascal_images('/home/monaj/bin/VOCdevkit/VOC2012/JPEGImages')
+class Read_imagenet_data(Dataset):
+
+    def __init__(self, root, img_size, apply_transform=True):
+        self.apply_transform = apply_transform
+        self.img_size = img_size
+        self.image_files = []
+        self.label_files = []
+        self.root = root
+        with open(os.path.join(root, 'ImageSets/CLS-LOC/train_cls.txt')) as f:
+            lines = f.readlines()
+        filenames = [l.strip() for l in lines]
+        N = len(filenames)
+        pbar = InitBar()
+        print('Loading imagenet filenames...\n')
+        for i in range(N):
+            pbar(100.0 * float(i) / float(N))
+            image = filenames[i].split()[0]
+            self.image_files.append(root+'/'+image+'.JPEG')
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        image_name = self.image_files[idx]
+        image = io.imread(image_name)
+        #image = transforms.ToPILImage()(image)
+        if self.apply_transform:
+            image = self.transform(image)
+        return image
+
+    def transform(self, img):
+        #img = img[:, :, ::-1]
+        img = img.astype(np.float64)
+        img = m.imresize(img, (self.img_size, self.img_size))
+        img = img.astype(float) / 255.0
+        img = img.transpose(2, 0, 1)
+
+        img = torch.from_numpy(img).float()
+        return img
+
+class Rescale(object):
+
+    def __init__(self, output_size):
+        assert isinstance(output_size, (int, tuple))
+        self.output_size = output_size
+
+    def __call__(self, input):
+        h, w = input.shape[:2]
+        if isinstance(self.output_size, int):
+            if h > w:
+                new_h, new_w = self.output_size * h / w, self.output_size
+            else:
+                new_h, new_w = self.output_size, self.output_size * w / h
+        else:
+            new_h, new_w = self.output_size
+
+        new_h, new_w = int(new_h), int(new_w)
+        img = m.imresize(input, (new_h, new_w))
+        return img
+
+class RandomCrop(object):
+
+    def __init__(self, output_size):
+        assert isinstance(output_size, (int, tuple))
+        if isinstance(output_size, int):
+            self.output_size = (output_size, output_size)
+        else:
+            assert len(output_size) == 2
+            self.output_size = output_size
+
+    def __call__(self, data):
+        if isinstance(data, tuple):
+            image, label = data
+        else:
+            image = data
+        h, w = image.shape[:2]
+        new_h, new_w = self.output_size
+        top = np.random.randint(0, h - new_h)
+        left = np.random.randint(0, w - new_w)
+        image = image[top: top + new_h, left: left + new_w]
+        if isinstance(data, tuple):
+            label = label[top: top + new_h, left: left + new_w]
+            return image, label
+        else:
+            return image

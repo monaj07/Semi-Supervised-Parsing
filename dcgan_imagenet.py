@@ -81,6 +81,8 @@ elif opt.dataset == 'pascal':
                                        split=opt.phase, img_size=opt.imageSize, apply_transform=True)
     dataset_val = Read_pascal_labeled_data(root=opt.dataroot, nCls=NUM_CLASSES, splits_path=opt.splitPath,
                                        split='val', img_size=opt.imageSize, apply_transform=True)
+elif opt.dataset == 'imagenet_myself':
+    dataset = Read_imagenet_data(root=opt.dataroot, img_size=opt.imageSize, apply_transform=True)
 elif opt.dataset == 'lsun':
     dataset = dset.LSUN(db_path=opt.dataroot, classes=['bedroom_train'],
                         transform=transforms.Compose([
@@ -96,14 +98,9 @@ elif opt.dataset == 'cifar10':
                                transforms.ToTensor(),
                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                            ]))
-elif opt.dataset == 'fake':
-    dataset = dset.FakeData(image_size=(3, opt.imageSize, opt.imageSize),
-                            transform=transforms.ToTensor())
-assert (dataset and dataset_val)
+assert (dataset)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize,
                                          shuffle=True, num_workers=int(opt.workers))
-dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=opt.batchSize,
-                                         shuffle=False, num_workers=int(opt.workers))
 
 ngpu = int(opt.ngpu)
 nz = int(opt.nz)
@@ -139,8 +136,9 @@ def cross_entropy2d(input, target, weight=None, size_average=True):
 
 class alexnet_features(nn.Module):
 
-    def __init__(self, supervised_pretrained_weights=False):
+    def __init__(self, ngpu):
         super(alexnet_features, self).__init__()
+        self.ngpu = ngpu
 
         self.main_body = nn.Sequential(
             nn.Conv2d(in_channels=3, out_channels=96, kernel_size=11, stride=4, padding=0),
@@ -169,8 +167,6 @@ class alexnet_features(nn.Module):
             nn.Conv2d(256, 4096, kernel_size=7),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.5),
-        )
-        self.main_body2 = nn.Sequential(
 
             nn.Conv2d(4096, 4096, kernel_size=1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -178,8 +174,10 @@ class alexnet_features(nn.Module):
         )
 
     def forward(self, x):
-        output = self.main_body(x)
-        output = self.main_body2(output)
+        if isinstance(x.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+            output = nn.parallel.data_parallel(self.main_body, x, range(self.ngpu))
+        else:
+            output = self.main_body(x)
         return output
 
 class alexnet_segmenter(nn.Module):
@@ -210,7 +208,7 @@ class alexnet_segmenter(nn.Module):
         output = F.upsample_bilinear(y, self.orig_size)
         return output
 
-net_features = alexnet_features()
+net_features = alexnet_features(ngpu)
 net_features.apply(weights_init)
 if opt.net_features != '':
     net_features.load_state_dict(torch.load(os.path.join(opt.outf, opt.net_features)))
@@ -249,8 +247,6 @@ class _netG(nn.Module):
             nn.BatchNorm2d(ngf),
             nn.ReLU(True),
             # state size. (ngf*2) x 112 x 112
-        )
-        self.main2 = nn.Sequential(
             nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False),
             nn.Tanh()
             # state size. (nc) x 224 x 224
@@ -261,7 +257,6 @@ class _netG(nn.Module):
             output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
         else:
             output = self.main(input)
-            output = self.main2(output)
         return output
 
 
@@ -284,7 +279,10 @@ class _netD(nn.Module):
         )
 
     def forward(self, x):
-        y = self.classifier(x)
+        if isinstance(x.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+            y = nn.parallel.data_parallel(self.classifier, x, range(self.ngpu))
+        else:
+            y = self.classifier(x)
         return y.view(-1, 1).squeeze(1)
 
 netD = _netD(ngpu)
@@ -329,7 +327,7 @@ optimizerS = optim.Adam(list(net_features.parameters())+list(net_segmenter.param
 optimizerD = optim.Adam(list(net_features.parameters())+list(netD.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
 optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 
-SS =  1
+SS =  0
 GAN = 1
 
 for epoch in range(opt.niter):
@@ -346,129 +344,79 @@ for epoch in range(opt.niter):
 
         iter = len(dataloader) * epoch + i
 
-        poly_lr_scheduler(optimizerS, opt.lr, iter)
+        #poly_lr_scheduler(optimizerS, opt.lr, iter)
 
-        if GAN:
-            ############################
-            # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
-            ###########################
-            netD.zero_grad()
-            net_features.zero_grad()
+        ############################
+        # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+        ###########################
+        netD.zero_grad()
+        net_features.zero_grad()
 
-            # train with real
-            label.resize_(batch_size).fill_(real_label)
-            labelv = Variable(label)
-            inputv_feats = net_features(inputv)
-            output = netD(inputv_feats)
-            errD_real = criterion(output, labelv)
-            errD_real.backward()
-            D_x = output.data.mean()
+        # train with real
+        label.resize_(batch_size).fill_(real_label)
+        labelv = Variable(label)
+        inputv_feats = net_features(inputv)
+        output = netD(inputv_feats)
+        errD_real = criterion(output, labelv)
+        errD_real.backward()
+        D_x = output.data.mean()
 
-            # train with fake
-            noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
-            noisev = Variable(noise)
-            fake = netG(noisev)
-            labelv = Variable(label.fill_(fake_label))
-            fake_feats = net_features(fake.detach())
-            output = netD(fake_feats)
-            errD_fake = criterion(output, labelv)
-            errD_fake.backward()
-            D_G_z1 = output.data.mean()
+        # train with fake
+        noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
+        noisev = Variable(noise)
+        fake = netG(noisev)
+        labelv = Variable(label.fill_(fake_label))
+        fake_feats = net_features(fake.detach())
+        output = netD(fake_feats)
+        errD_fake = criterion(output, labelv)
+        errD_fake.backward()
+        D_G_z1 = output.data.mean()
 
-            errD = errD_real + errD_fake
-            optimizerD.step()
+        errD = errD_real + errD_fake
+        optimizerD.step()
 
-            ############################
-            # (2) Update G network: maximize log(D(G(z)))
-            ###########################
-            netG.zero_grad()
+        ############################
+        # (2) Update G network: maximize log(D(G(z)))
+        ###########################
+        netG.zero_grad()
 
-            label.resize_(batch_size).fill_(real_label)
-            labelv = Variable(label.fill_(real_label))  # fake labels are real for generator cost
-            noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
-            noise2v = Variable(noise)
-            fake2 = netG(noise2v)
-            fake_feats2 = net_features(fake2)
-            output = netD(fake_feats2)
-            errG = criterion(output, labelv)
-            errG.backward()
-            D_G_z2 = output.data.mean()
-            optimizerG.step()
-
-        if SS:
-            ############################
-            # Update semantic labeling network
-            ###########################
-            net_features.zero_grad()
-            net_segmenter.zero_grad()
-
-            images = padder(inputv)
-            feature_maps = net_features(images)
-            outputs = net_segmenter(feature_maps)
-
-            loss = cross_entropy2d(outputs, labelv_semantic)
-            loss.backward()
-
-            optimizerS.step()
+        label.resize_(batch_size).fill_(real_label)
+        labelv = Variable(label.fill_(real_label))  # fake labels are real for generator cost
+        noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
+        noise2v = Variable(noise)
+        fake2 = netG(noise2v)
+        fake_feats2 = net_features(fake2)
+        output = netD(fake_feats2)
+        errG = criterion(output, labelv)
+        errG.backward()
+        D_G_z2 = output.data.mean()
+        optimizerG.step()
 
         ######################################################
         ### Loss Report:
         ######################################################
 
         if GAN:
-            if (i + 1) % 10 == 0:
+            if (i) % 100 == 0 and i>0:
                 print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f'
-                      % (epoch, opt.niter, i+1, len(dataloader),
+                      % (epoch, opt.niter, i, len(dataloader),
                          errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2))
-            if i % 100 == 0:
+            if i % 500 == 0 and i>0:
                 vutils.save_image(real_cpu,
                         '%s/real_samples.png' % opt.outf,
                         normalize=True)
                 fake = netG(fixed_noise)
                 vutils.save_image(fake.data,
-                        '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch),
+                        '%s/fake_samples_epoch_%03d_%03d.png' % (opt.outf, epoch, i),
                         normalize=True)
-        if (SS):
-            if (i + 1) % 10 == 0:
-                print("Iter [%d/%d] Epoch [%d/%d] Loss: %.4f" % (i + 1, len(dataloader), epoch + 1, opt.niter, loss.data[0]))
+            if i % 3000 == 0 and i>0:
+                torch.save(net_features.state_dict(), '%s/net_features_epoch_%d_%d.pth' % (opt.outf, epoch, i))
+                torch.save(netG.state_dict(), '%s/netG_epoch_%d_%d.pth' % (opt.outf, epoch, i))
+                torch.save(netD.state_dict(), '%s/netD_epoch_%d_%d.pth' % (opt.outf, epoch, i))
 
-    ######################################################
-    ### Validation of the semantic segmentation module:
-    ######################################################
-    if SS:
-        gts, preds = [], []
-        for j, data_val in enumerate(dataloader_val, 0):
-            real_cpu, label_cpu = data_val
-            batch_size = real_cpu.size(0)
-            if opt.cuda:
-                real_cpu = real_cpu.cuda()
-                label_cpu = label_cpu.cuda()
-            input.resize_as_(real_cpu).copy_(real_cpu)
-            inputv = Variable(input)
-            labelv_semantic = Variable(label_cpu)
-
-            images = padder(inputv)
-            feature_maps = net_features(images)
-            outputs = net_segmenter(feature_maps)
-
-            pred = np.squeeze(outputs.data.max(1)[1].cpu().numpy(), axis=1)
-            gt = labelv_semantic.data.cpu().numpy()
-            for gt_, pred_ in zip(gt, pred):
-                gts.append(gt_)
-                preds.append(pred_)
-
-        print('\n' + '-' * 40)
-        score, class_iou = scores(gts, preds, n_class=NUM_CLASSES)
-        for k, v in score.items():
-            print(k, v)
-        print('-' * 20)
-        for i in range(NUM_CLASSES):
-            print(i, class_iou[i])
-        print('-' * 40 + '\n')
 
     # do checkpointing
-    if (epoch%10==0) and (epoch>0):
+    if (epoch%1==0):
+        torch.save(net_features.state_dict(), '%s/net_features_epoch_%d.pth' % (opt.outf, epoch))
         torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch))
         torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.outf, epoch))
-        torch.save(net_features.state_dict(), '%s/net_features_epoch_%d.pth' % (opt.outf, epoch))
-        torch.save(net_segmenter.state_dict(), '%s/net_segmenter_epoch_%d.pth' % (opt.outf, epoch))
