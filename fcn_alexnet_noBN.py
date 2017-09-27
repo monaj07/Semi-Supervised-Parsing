@@ -27,7 +27,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', required=True, help='cifar10 | lsun | imagenet | folder | lfw | fake')
 parser.add_argument('--dataroot', required=True, help='path to dataset')
 parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
-parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
+parser.add_argument('--batchSize', type=int, default=1, help='input batch size')
 parser.add_argument('--imageSize', type=int, default=64, help='the height / width of the input image to network')
 parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
@@ -280,7 +280,7 @@ for epoch in range(opt.niter):
 
         iter = len(dataloader) * epoch + i
 
-        #poly_lr_scheduler(optimizerS, opt.lr, iter)
+        poly_lr_scheduler(optimizerS, opt.lr, iter)
 
         ############################
         # Update semantic labeling network
