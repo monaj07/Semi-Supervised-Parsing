@@ -13,3 +13,6 @@
 `python fcn_dcgan_alexnet.py --dataset pascal --dataroot /home/monaj/bin/VOCdevkit/VOC2012/ --imageSize 224 --batchSize 64 --manualSeed 5069 --cuda --niter 50  --phase train --splitPath ./splits`
 - If wanted to start from a recorded epoch:
 `python fcn_dcgan_alexnet.py --dataset pascal --dataroot /home/monaj/bin/VOCdevkit/VOC2012/ --imageSize 224 --batchSize 64 --manualSeed 5069 --cuda --niter 50  --phase train --splitPath ./splits --netG netG_epoch_160.pth --netD netD_epoch_160.pth --net_features net_features_epoch_160.pth`
+
+- Alexnet-FCN using supervised pretrained imagenet weights: (batch_size should be one)
+`python fcn_alexnet_noBN.py --dataset pascal --dataroot /home/monaj/bin/VOCdevkit/VOC2012/ --imageSize 224 --batchSize 1 --manualSeed 5069 --cuda --niter 100 --phase train --splitPath ./splits --lr .00001 --gpu 1`
