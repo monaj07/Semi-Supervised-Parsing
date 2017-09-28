@@ -72,17 +72,18 @@ class Read_pascal_labeled_data(Dataset):
         return image, label
 
     def transform(self, img, lbl):
-        #img = img[:, :, ::-1]
+        img = img[:, :, ::-1]
         img = img.astype(np.float64)
         img -= 255
         img = m.imresize(img, (self.img_size, self.img_size))
         img = img.astype(float) / 255.0
         img = img.transpose(2, 0, 1)
 
-        lbl[lbl==255] = 0
+
         lbl = lbl.astype(float)
         lbl = m.imresize(lbl, (self.img_size, self.img_size), 'nearest', mode='F')
         lbl = lbl.astype(int)
+        lbl[lbl == 255] = -1
 
         img = torch.from_numpy(img).float()
         lbl = torch.from_numpy(lbl).long()

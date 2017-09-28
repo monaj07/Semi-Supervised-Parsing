@@ -278,9 +278,8 @@ for epoch in range(opt.niter):
         inputv = Variable(input)
         labelv_semantic = Variable(label_cpu)
 
-        iter = len(dataloader) * epoch + i
-
-        poly_lr_scheduler(optimizerS, opt.lr, iter)
+        #iter = len(dataloader) * epoch + i
+        #poly_lr_scheduler(optimizerS, opt.lr, iter)
 
         ############################
         # Update semantic labeling network
